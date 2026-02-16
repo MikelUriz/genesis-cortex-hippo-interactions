@@ -187,7 +187,7 @@ class CVAEFilm(CVAE):
         n_features: int,
         n_cond_channels: int,
         image_size: int,
-        reduction: str
+        reduction: str = "sum" # try mean also
     ):
         super().__init__(
             config=config,
