@@ -634,6 +634,193 @@ class CVAESemEpiInputCondMFiLM(BaseModel):
         )
 
         torch.save(data, path)
-        
 
 
+class CVAEMultipleFeatures(BaseModel):
+    def __init__(self,
+                 config: AEModelConfig,
+                 n_dim_by_feature: dict[str, int],
+                 n_cond_channels: int,
+                 image_size: int,
+                 reduction: Literal["mean", "sum"] = "mean"
+                 ):
+        super().__init__(config=config)
+        self.latent_dim = config.latent_dim
+        self.hidden_dim_base = config.hidden_dim_base
+        self.m = config.m
+        self.kld_beta = config.kld_beta
+        self.n_dim_by_feature = n_dim_by_feature
+        self.rec_loss = binary_cross_entropy_with_logits
+        self.reduction = reduction
+
+        # --- Image Encoder/Decoder
+        self.image_encoder = EncoderDownM(config)
+        self.image_decoder = DecoderUpM(config)
+
+        with torch.no_grad():
+            h = self.image_encoder(torch.randn(1, 3, image_size, image_size))
+            self.hidden_shape = h.shape[1:]
+            self.cond_hidden_shape = (n_cond_channels, self.hidden_shape[-1], self.hidden_shape[-1])
+            self.c_dim = np.prod(self.cond_hidden_shape)
+
+        # --- Sem/Feat Embedders ---#
+        feat_embeddings = {}
+        for k, v in self.n_dim_by_feature.items():
+            feat_embeddings[k] = nn.Embedding(v, self.c_dim)
+        self.feat_embeddings = nn.ModuleDict(feat_embeddings)
+
+        # bring the decoder input to have latent_dim number of channels
+        self.image_decoder_input_cond_proj = nn.Conv2d(
+            self.latent_dim + n_cond_channels * len(self.n_dim_by_feature),
+            self.latent_dim,
+            kernel_size=1
+        )
+
+        # --- gaussian latents proj ---#
+        self.mu_proj = nn.Conv2d(self.latent_dim, self.latent_dim, 1)
+        self.logvar_proj = nn.Conv2d(self.latent_dim, self.latent_dim, 1)
+
+    def _create_conditional_image_decoder_input(self,
+                                                hidden_states: torch.Tensor,
+                                                feat_embedding: dict[str, torch.Tensor],
+                                                ):
+        """
+        Given C=[c_feat * N] embedding, concatenate it with image encoded
+        latent states to make conditioning, and project everything to a
+        dimension compatible for the decoder input (latent_dim, w, h).
+
+        hidden_states: image latent states (batch_size, latent_dim, w/2^m, h/2^m).
+        feat_embedding: feature embedding representing color label (batch_size, latent_dim, w/2^m, h/2^m).
+        """
+        decoder_input = torch.cat([hidden_states] + list(feat_embedding.values()),
+                                  dim=1)  # (batch_size, latent_dim + c_dim * n_features, w, h)
+        decoder_input = self.image_decoder_input_cond_proj(decoder_input)  # (batch_size, latent_dim, w/2^m, h/2^m)
+        return decoder_input
+
+    def _reparameterize(self,
+                        mu: torch.Tensor,
+                        logvar: torch.Tensor
+                        ) -> torch.Tensor:
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def encode(self, pixel_values):
+        h = self.image_encoder(pixel_values)
+        mu, logvar = self.mu_proj(h), self.logvar_proj(h)
+        return mu, logvar
+
+    def decode(self,
+               hidden_states: torch.Tensor,
+               feat_embedding: dict[str, torch.Tensor],
+               ):
+        """
+        Project hidden states and conditioning embeddings to the reconstructed image.
+
+        hidden_states: image latent states (batch_size, latent_dim, w/2^m, h/2^m).
+        feat_embedding: feature embedding representing color label (batch_size, latent_dim, w/2^m, h/2^m).
+        """
+        decoder_input = self._create_conditional_image_decoder_input(
+            hidden_states,
+            feat_embedding
+        )  # Conditional Input to Decoder by merging sem/feat embeddings with image hidden states
+
+        reconstructed = self.image_decoder(decoder_input)
+        return reconstructed
+
+    def forward(self,
+                pixel_values: torch.Tensor,
+                feature_ids: dict[str, torch.LongTensor],
+                ) -> VAEOutput:
+        """
+        pixel_values: batch of RGB images (batch_size, 3, W, H).
+        feature_ids: color label.
+        """
+
+        feat_embed = {
+            k: v(feature_ids[k]).view(-1, *self.cond_hidden_shape) for k, v in self.feat_embeddings.items()
+        }
+
+        mu, logvar = self.encode(pixel_values)
+        z = self._reparameterize(mu, logvar)
+
+        reconstructed = self.decode(z, feat_embed)
+
+        if self.reduction == "mean":
+            rec_loss = self.rec_loss(reconstructed, pixel_values)
+            kld_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+            loss = rec_loss + self.kld_beta * kld_loss
+
+        elif self.reduction == "sum":
+            rec_loss = self.rec_loss(reconstructed, pixel_values, reduction="none").sum(dim=(1, 2, 3))
+            # kld_loss = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp()).sum(dim=(1,2,3))
+            kld_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+            loss = rec_loss + self.kld_beta * kld_loss
+            loss = loss.mean()
+            rec_loss = rec_loss.mean()
+            # kld_loss = kld_loss.mean()
+
+        return VAEOutput(reconstructed, loss, rec_loss, kld_loss)
+
+    @torch.no_grad()
+    def conditional_simulation(self,
+                               *,
+                               feature_id: {str, np.ndarray[int]},
+                               ) -> torch.Tensor:
+        """
+        Simulate an RGB image [0,1] given label and feature ids.
+
+        label_id: digit label 0-9 (MNIST).
+        feature_id: color label.
+        """
+        device = next(iter(self.parameters())).device
+        bs = None
+        for k, v in feature_id.items():
+            if isinstance(v, int):
+                v = torch.tensor([v], device=device)
+                feature_id[k] = v
+                if bs is None:
+                    bs = v.size(0)
+                else:
+                    assert bs == v.size(0)
+
+
+        z = torch.randn(bs, *self.hidden_shape, device=device)
+        feat_embed = {
+            k: v(feature_id[k]).view(bs, *self.cond_hidden_shape) for k, v in self.feat_embeddings.items()
+        }
+
+        reconstructed = self.decode(z, feat_embed)
+
+        if bs == 1:
+            return reconstructed[0]
+        else:
+            return reconstructed
+
+
+class CVAEFilmMultipleFeatures(CVAEMultipleFeatures):
+    def __init__(self,
+                 config: AEModelConfig,
+                 n_dim_by_feature: dict[str, int],
+                 n_cond_channels: int,
+                 image_size: int,
+                 reduction: str = "sum"  # try mean also
+                 ):
+        super().__init__(
+            config=config,
+            n_dim_by_feature=n_dim_by_feature,
+            n_cond_channels=n_cond_channels,
+            image_size=image_size,
+            reduction=reduction
+        )
+
+        config.cond_channels = int(n_cond_channels * len(n_dim_by_feature))
+        self.image_decoder = DecoderUpMFiLM(config)
+
+    def decode(self,
+               hidden_states: torch.Tensor,
+               feat_embedding: dict[str, torch.Tensor],
+               ):
+        cond = torch.cat(list(feat_embedding.values()), dim=1)
+        reconstructed = self.image_decoder(hidden_states, cond)
+        return reconstructed

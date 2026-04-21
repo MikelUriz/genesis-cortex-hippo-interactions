@@ -15,12 +15,12 @@ from lib import filepaths
 
 
 class ColoredMNISTDataset(Dataset):
-    def __init__(self, 
-        color_codes: Iterable[Color], 
-        resize: int = 32, 
-        train: bool = True,
-        random_state: int = 44
-    ):
+    def __init__(self,
+                 color_codes: Iterable[Color],
+                 resize: int = 32,
+                 train: bool = True,
+                 random_state: int = 44
+                 ):
         """
         Args:
             color_codes (Iterable[Color]): list of RGB vectors (e.g. [[1,0,0], [0,1,0], [1,1,0]])
@@ -33,7 +33,7 @@ class ColoredMNISTDataset(Dataset):
             train=train,
             download=True
         )
-        self.images = mnist.data/255.
+        self.images = mnist.data / 255.
         self.labels = mnist.targets.numpy()
         self.color_codes = color_codes
         self.resize = resize
@@ -41,26 +41,24 @@ class ColoredMNISTDataset(Dataset):
         color_ids = np.zeros_like(self.labels)
         for label in np.unique(self.labels):
             color_ids_label = [
-                i*v for i,v in 
+                i * v for i, v in
                 enumerate(np.array_split(
-                    np.ones_like(self.labels[self.labels==label]), 
+                    np.ones_like(self.labels[self.labels == label]),
                     len(color_codes)
                 ))
             ]
             color_ids_label = np.concatenate(color_ids_label)
-            color_ids[self.labels==label] = color_ids_label
-        
+            color_ids[self.labels == label] = color_ids_label
+
         # dataframe aligning indexes, class label with color id
         self.data_table = pd.DataFrame(dict(
-            label=self.labels, 
+            label=self.labels,
             color_id=color_ids
         ))
         self.data_table = self.data_table.sample(frac=1, random_state=random_state).reset_index(names="idx")
 
-
     def __len__(self):
         return len(self.data_table)
-
 
     def __getitem__(self, idx):
         data_sample = self.data_table.iloc[idx]
@@ -75,16 +73,16 @@ class ColoredMNISTDataset(Dataset):
         label = torch.tensor(data_sample.label).long()
         color_id = torch.tensor(color_id).long()
         return pixel_values_resized, label, color_id
-    
+
 
 class ColoredMNISTDatasetAblated(ColoredMNISTDataset):
     def __init__(self,
-        missing_pairs: Iterable[Tuple[int, int]],
-        color_codes: Iterable[Color], 
-        resize: int = 32, 
-        train: bool = True,
-        random_state: int = 44
-    ):
+                 missing_pairs: Iterable[Tuple[int, int]],
+                 color_codes: Iterable[Color],
+                 resize: int = 32,
+                 train: bool = True,
+                 random_state: int = 44
+                 ):
         """
         Args:
             missing_pairs (Iterable[Tuple[int, int]]): (digit_id, color_id) pairs to omit
@@ -94,21 +92,19 @@ class ColoredMNISTDatasetAblated(ColoredMNISTDataset):
             random_state (int): random seed to shuffle digit_id and color_id assignments
         """
         super().__init__(
-            color_codes=color_codes, 
-            resize=resize, 
+            color_codes=color_codes,
+            resize=resize,
             train=train,
             random_state=random_state
         )
         self.missing_pairs = missing_pairs
 
         for pairs in missing_pairs:
-            filter_idx = (self.data_table.label==pairs[0]) * (self.data_table.color_id==pairs[1])
+            filter_idx = (self.data_table.label == pairs[0]) * (self.data_table.color_id == pairs[1])
             self.data_table = self.data_table[~filter_idx].reset_index(drop=True)
 
-    
     def __len__(self):
         return len(self.data_table)
-    
 
     def preview_colored_digits(self, title: str = ""):
         """
@@ -140,11 +136,11 @@ class ColoredMNISTDatasetAblated(ColoredMNISTDataset):
 
         if len(images) == 0:
             raise RuntimeError("No images found")
-        
+
         # Stack into a single tensor and plot
         sorted_with_index = sorted(enumerate(seen), key=lambda x: (x[1][0], x[1][1]))
         positions = [idx for idx, _ in sorted_with_index]
-        imgs_tensor = torch.stack(images)[torch.tensor(positions)] # sort images by digit and color id ordering
+        imgs_tensor = torch.stack(images)[torch.tensor(positions)]  # sort images by digit and color id ordering
         n = imgs_tensor.size(0)
         nrow = int(math.ceil(math.sqrt(n)))
 
@@ -155,7 +151,7 @@ class ColoredMNISTDatasetAblated(ColoredMNISTDataset):
         plt.axis('off')
         plt.show()
 
-        
+
 @dataclass
 class Input:
     pixel_values: torch.FloatTensor
@@ -178,7 +174,7 @@ def get_ColoredMNISTDataset_dataloader(
         batch_size (int): batch size for the dataloaders
         dataset (Dataset): Dataset instances of Colored MNIST
     """
-    
+
     def collate_fn(batch):
         pixel_values = []
         label_ids = []
@@ -193,9 +189,9 @@ def get_ColoredMNISTDataset_dataloader(
             label_ids=torch.stack(label_ids),
             feature_ids=torch.stack(feature_ids)
         )
-    
+
     dataloader = DataLoader(
-        dataset, 
+        dataset,
         batch_size=batch_size,
         collate_fn=collate_fn,
         **kwargs
@@ -215,7 +211,7 @@ def get_ColoredMNISTDataset_train_test_dataloaders(
         batch_size (int): batch size for the dataloaders
         train_dataset/test_dataset (Dataset): Dataset instances of Colored MNIST
     """
-    
+
     def collate_fn(batch):
         pixel_values = []
         label_ids = []
@@ -232,14 +228,14 @@ def get_ColoredMNISTDataset_train_test_dataloaders(
         )
 
     train_dataloader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size, shuffle=True, 
+        train_dataset,
+        batch_size=batch_size, shuffle=True,
         collate_fn=collate_fn,
         **kwargs
     )
 
     test_dataloader = DataLoader(
-        test_dataset, 
+        test_dataset,
         batch_size=batch_size, shuffle=False,
         collate_fn=collate_fn,
         **kwargs

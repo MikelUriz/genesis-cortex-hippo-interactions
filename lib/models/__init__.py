@@ -5,3 +5,4 @@ from lib.models.decoders import DecoderUpM
 from lib.models.autoencoders import CVAESemEpiInputCondM, CVAESemEpiInputCondMFiLM, CVAE, CVAEFilm
 from lib.models.classifiers import TripleClassifier, TripleClassifierConfig
 from lib.models.capacity_constrained_autoencoders import ConfigBetaVAEForEmbedding, BetaVAEForEmbedding
+from lib.models.autoencoders import CVAEMultipleFeatures, CVAEFilmMultipleFeatures
